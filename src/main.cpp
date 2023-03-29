@@ -9,12 +9,10 @@
 #include <PN532_HSU.h>
 #include <PN532.h>
 #include <Dictionary.h>
-
 #include "avdweb_Switch.h"
-
 #include <TaskScheduler.h>
-
 #include "esp_log.h"
+#include <AverageFilter.h>
 
 // SD Card
 #define SD_CS 22
@@ -38,6 +36,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 PN532_HSU pn532hsu(Serial2);
 PN532 nfc(pn532hsu);
+
+// Power control
+const int Pin_On_Off = 32;
+const int Pin_Batt_Sense = 34;
 
 // Button
 const int Pin_vol_up = 39;
@@ -73,6 +75,12 @@ struct Music_info
   int mute_volume;
 } music_info = {"", 0, 0, 0, 0, 0};
 
+struct Battery_info
+{
+  int level;
+  int voltage;
+} battery_info = {0, 0};
+
 
 uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };	// Buffer to store the returned UID
 uint8_t uidLength;				// Length of the UID (4 or 7 bytes depending on ISO14443A card type)
@@ -89,6 +97,10 @@ int file_index = 0;
 
 Dictionary &tags = *(new Dictionary());
 
+const int BATTERY_LEVEL_SAMPLES = 64;
+
+averageFilter<int> batteryLevel(64);
+
 // Scheduler
 Scheduler ts;
 
@@ -102,6 +114,8 @@ void inputDisableCBs();
 void inputLoop();
 void audioLoop();
 void update_audio_info();
+
+void updateBatteryLevel();
 
 bool onDisplayEnabled();
 void displayUpdate();
@@ -142,6 +156,18 @@ Task nfcTask(1 * TASK_SECOND, TASK_FOREVER, &nfcLoop, &ts);      //adding task t
 Task displayTask(500 * TASK_MILLISECOND, TASK_FOREVER, &displayUpdate, &ts, false, &onDisplayEnabled, &onDisplayDisabled);  //adding task to the chain on creation
 Task displaySleepTimerTask(1 * TASK_SECOND, TASK_FOREVER, &displaySleepTimerUpdate, &ts, false, nullptr, &displaySleepTimerElapsed);  //adding task to the chain on creation
 Task poweroffTimerTask(1 * TASK_SECOND, TASK_FOREVER, &poweroffTimerUpdate, &ts, false, nullptr, &poweroffTimerElapsed);  //adding task to the chain on creation
+Task batteryUpdateTask(1 * TASK_MINUTE, TASK_FOREVER, &updateBatteryLevel, &ts);  //adding task to the chain on creation
+
+void updateBatteryLevel()
+{
+  for (size_t i = 0; i < 64; i++)
+  {
+    batteryLevel.value(analogRead(Pin_Batt_Sense));
+  }
+  
+  battery_info.voltage = batteryLevel.currentValue();
+  battery_info.level = map(battery_info.voltage, 0, 4095, 0, 100);
+}
 
 void audioLoop()
 {
@@ -312,6 +338,9 @@ void displayUpdate()
   display.println(buf);
 
   sprintf(buf, "volume %2d/21", music_info.volume);
+  display.println(buf);
+
+  sprintf(buf, "battery %3d%%", battery_info.level);
   display.println(buf);
 
   display.println("--------------");
@@ -605,6 +634,10 @@ int get_music_list(fs::FS &fs, const char *dirname, uint8_t levels, String wavli
 
 void setup()
 {
+  // Power
+  pinMode(Pin_On_Off, OUTPUT);
+  digitalWrite(Pin_On_Off, HIGH);
+
   // Serial
   Serial.begin(115200);
 
@@ -686,6 +719,8 @@ void setup()
   // file_list[0] = "MoonlightBay.mp3";
   open_new_song(file_list[file_index]);
 
+  batteryLevel.initialize();
+
   audioTask.enable();
   audioMetadataTask.enable();
   inputTask.enable();
@@ -695,6 +730,7 @@ void setup()
   poweroffTimerTask.setTimeout(POWEROFF_TIMOUT);
   displaySleepTimerTask.enable();
   displaySleepTimerTask.setTimeout(DISPLAY_IDLE_TIMOUT);
+  batteryUpdateTask.enable();
 }
 
 void loop()
