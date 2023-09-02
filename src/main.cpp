@@ -1,4 +1,5 @@
 #include "Arduino.h"
+#include <WiFi.h>
 //#include "WiFiMulti.h"
 #include "Audio.h"
 #include <SPI.h>
@@ -59,12 +60,6 @@ Switch btn_next(Pin_next);
 
 Audio audio;
 
-/*
-WiFiMulti wifiMulti;
-String ssid = "Makerfabs";
-String password = "20160704";
-*/
-
 struct Music_info
 {
   String name;
@@ -96,6 +91,7 @@ int file_num = 0;
 int file_index = 0;
 
 Dictionary &tags = *(new Dictionary());
+Dictionary &config = *(new Dictionary());
 
 const int BATTERY_LEVEL_SAMPLES = 64;
 
@@ -149,7 +145,7 @@ void display_wakeup();
 #define INPUT_POLL_IDLE (200 * TASK_MILLISECOND)
 
 // Tasks
-Task audioTask(3 * TASK_MILLISECOND, TASK_FOREVER, &audioLoop, &ts);  //adding task to the chain on creation
+Task audioTask(5 * TASK_MILLISECOND, TASK_FOREVER, &audioLoop, &ts);  //adding task to the chain on creation
 Task audioMetadataTask(1 * TASK_SECOND, TASK_FOREVER, &update_audio_info, &ts);  //adding task to the chain on creation
 Task inputTask(20 * TASK_MILLISECOND, TASK_FOREVER, &inputLoop, &ts, false, &inputEnableCBs, &inputDisableCBs);      //adding task to the chain on creation
 Task nfcTask(1 * TASK_SECOND, TASK_FOREVER, &nfcLoop, &ts);      //adding task to the chain on creation
@@ -354,12 +350,21 @@ void open_new_song(String filename)
   //去掉文件名的根目录"/"和文件后缀".mp3",".wav"
   // music_info.name = filename.substring(1, filename.indexOf("."));
   music_info.name = filename;
+if(filename.startsWith("http://") || filename.startsWith("https://")) {
+    // internet stream
+    audio.connecttohost(filename.c_str());
+    music_info.status = 1;
+    music_info.volume = audio.getVolume();
+    log_i("Loaded stream '%s'", filename.c_str());
+  } else { 
+    // local music
   audio.connecttoFS(SD, filename.c_str());
   music_info.runtime = audio.getAudioCurrentTime();
   music_info.length = audio.getAudioFileDuration();
   music_info.volume = audio.getVolume();
   music_info.status = 1;
-  Serial.println("**********start a new sound************");
+  log_i("Loaded song '%s'", filename.c_str());
+  }
 }
 
 void onTagDetected(String uid)
@@ -544,6 +549,26 @@ void print_song_info()
   Serial.println("***********************************");
 }
 
+int load_config(fs::FS &fs, const char *filename)
+{
+  log_d("Loading config file '%s'", filename);
+
+  File config_file = fs.open(filename);
+  if (!config_file)
+  {
+    log_w("Config file not found");
+    return 0;
+  }
+
+  int r = config.jload(config_file);
+  if (r != DICTIONARY_OK)
+  {
+    log_e("Error loading config file (%d)", r);
+    return 0;
+  }
+  return config.count();
+}
+
 int load_tags_dict(fs::FS &fs, const char *filename)
 {
   Serial.printf("Loading tags info from file '%s'\n", filename);
@@ -652,6 +677,23 @@ void setup()
   }
   logoshow();
 
+  delay(10);
+
+  // SD(SPI)
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+  SPI.setFrequency(1000000);
+  if (!SD.begin(SD_CS, SPI))
+  {
+    Serial.println("Card Mount Failed");
+    lcd_error_show("SD ERR");
+    while (1); // halt
+  }
+
+  // Load config from SD
+  load_config(SD, "/config.json");
+
   nfc.begin();
 
   uint32_t versiondata = nfc.getFirmwareVersion();
@@ -669,23 +711,6 @@ void setup()
   // configure board to read RFID tags
   nfc.SAMConfig();
 
-  // SD(SPI)
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
-  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-  SPI.setFrequency(1000000);
-  if (!SD.begin(SD_CS, SPI))
-  {
-    Serial.println("Card Mount Failed");
-    lcd_error_show("SD ERR");
-    while (1)
-      ;
-  }
-  else
-  {
-    // lcd_text("SD OK");
-  }
-
   // Read SD
   file_num = get_music_list(SD, "/", 0, file_list);
   Serial.print("Music file count:");
@@ -700,16 +725,18 @@ void setup()
   file_num = load_tags_dict(SD, "/tags.json");
 
   // WiFi
-  /*
-  WiFi.mode(WIFI_STA);
-  wifiMulti.addAP(ssid.c_str(), password.c_str());
-  wifiMulti.run();
-  if (WiFi.status() != WL_CONNECTED)
-  {
-      WiFi.disconnect(true);
-      wifiMulti.run();
+  if(config("wifi_ssid")) {
+    WiFi.mode(WIFI_STA);
+    //wifiMulti.addAP(ssid.c_str(), password.c_str());
+    //wifiMulti.run();
+    WiFi.begin(config["wifi_ssid"].c_str(), config["wifi_pwd"].c_str());
+    log_d("Connecting to WiFi '%s' (%s)", config["wifi_ssid"].c_str(), config["wifi_pwd"].c_str());
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        delay(500);
+    }
+    log_i("Connected to '%s' with ip %s", config["wifi_ssid"].c_str(), WiFi.localIP().toString().c_str());
   }
-  */
 
   // Audio(I2S)
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
@@ -717,7 +744,7 @@ void setup()
 
   // audio.connecttoFS(SD, "/MoonlightBay.mp3"); //ChildhoodMemory.mp3  //MoonRiver.mp3 //320k_test.mp3
   // file_list[0] = "MoonlightBay.mp3";
-  open_new_song(file_list[file_index]);
+  //open_new_song(file_list[file_index]);
 
   batteryLevel.initialize();
 
@@ -757,10 +784,11 @@ void audio_eof_mp3(const char *info) {  //end of file
   {
      file_index = 0;
   }
-  open_new_song(file_list[file_index]);
+  //open_new_song(file_list[file_index]);
 }
 void audio_showstation(const char *info) {
   log_d("station: %s", info);
+
 
   // music_info.type = STREAM_TYPE;
   // music_info.title = String(info);
